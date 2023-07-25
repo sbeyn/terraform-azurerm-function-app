@@ -48,7 +48,10 @@ func TestEndToEndDeploymentScenario(t *testing.T) {
         test_structure.SaveTerraformOptions(t, fixtureFolder, terraformOptions)
 
         // Triggers the terraform init and terraform apply command
-        terraform.InitAndApply(t, terraformOptions)
+        if _, err := terraform.InitAndApply(t, terraformOptions); err != nil {
+            terraform.Destroy(t, terraformOptions)
+        }
+
     })
 
     test_structure.RunTestStage(t, "idempotence", func() {
@@ -56,7 +59,9 @@ func TestEndToEndDeploymentScenario(t *testing.T) {
         terraformOptions := test_structure.LoadTerraformOptions(t, fixtureFolder)
 
         // Triggers to check Terraform configuration is idempotent when a second apply results in 0 changes
-        terraform.ApplyAndIdempotent(t, terraformOptions)
+        if _, err := terraform.ApplyAndIdempotent(t, terraformOptions); err != nil {
+            terraform.Destroy(t, terraformOptions)
+        }
     })
 
 

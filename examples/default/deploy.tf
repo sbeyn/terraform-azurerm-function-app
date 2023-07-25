@@ -36,7 +36,7 @@ module "azure_function" {
 
   resource_group_name                                    = azurerm_resource_group.example.name
   location                                               = azurerm_resource_group.example.location
-  function_app_name                                      = "func${random_string.this.result}"
+  function_app_name                                      = "function"
   function_app_plan_id                                   = azurerm_app_service_plan.example.id
   function_app_storage_account_name                      = azurerm_storage_account.example.name
   function_app_storage_account_primary_connection_string = azurerm_storage_account.example.primary_connection_string

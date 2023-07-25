@@ -1,0 +1,171 @@
+resource_types:
+
+  - name: keyval
+    type: registry-image
+    source:
+      repository: ghcr.io/cludden/concourse-keyval-resource
+
+resources:
+
+  - name: keyval
+    type: keyval
+    icon: table
+    expose_build_created_by: true
+
+  - name: terraform-module-source
+    type: git
+    icon: github
+    source:
+      uri: git@github.com:sbeyn/((module)).git
+      branch: master
+      private_key: |
+        ((git-concourse.private-key))
+
+  - name: maven-repository
+    type: maven
+    icon: package-variant-closed
+    source:
+      url: https://nexus.swipsolution.fr/repository/maven-releases/
+      snapshot_url: https://nexus.swipsolution.fr/repository/maven-snapshots/
+      artifact: terraform.modules:((module)):tgz
+      username: ((nexus.username))
+      password: ((nexus.password))
+
+  - name: terraform-module-release
+    type: github-release
+    icon: github
+    source:
+      owner: sbeyn
+      repository: ((module))
+      access_token: ((github.GITHUB_API_KEY))
+
+jobs:
+
+  - name: vault-secrets-azure
+    plan:
+      - get: terraform-module-source
+        trigger: true
+      - set_pipeline: self
+        file: terraform-module-source/.concourse-ci.yml
+      - task: generate
+        config:
+          platform: linux
+          image_resource:
+            type: registry-image
+            source:
+              repository: vault
+          params:
+            VAULT_ADDR: https://vault.swipsolution.fr
+            VAULT_SKIP_VERIFY: true
+          outputs:
+            - name: vault-azure
+          run:
+            path: /bin/sh
+            args:
+              - -c
+              - |
+                export VAULT_TOKEN=$(vault write -field=token auth/approle/login role_id="((auth-pipeline.role_id))" secret_id="((auth-pipeline.secret_id))")
+                vault read -format=json factory/azure/creds/ops > vault-azure/creds.json
+                vault read -format=json factory/azure/config > vault-azure/config.json
+      - put: keyval
+        params:
+          mapping: |
+            arm_tenant_id = file("vault-azure/config.json").parse_json().data.tenant_id
+            arm_subscription_id = file("vault-azure/config.json").parse_json().data.subscription_id
+            arm_client_id = file("vault-azure/creds.json").parse_json().data.client_id
+            arm_client_secret = file("vault-azure/creds.json").parse_json().data.client_secret
+
+  - name: test-infrastructure-code
+    plan:
+      - get: terraform-module-source
+      - get: keyval
+        trigger: true
+      - load_var: creds
+        file: keyval/version.json
+      - task: terratest
+        config:
+          inputs:
+            - name: terraform-module-source
+            - name: keyval
+          platform: linux
+          image_resource:
+            type: registry-image
+            source:
+              repository: registry.swipsolution.fr:5000/docker-terratest
+              tag: latest
+              username: ((nexus.username))
+              password: ((nexus.password))
+              ca_certs:
+              - |
+                ((ca.chain))
+          params:
+            ARM_TENANT_ID: ((.:creds.arm_tenant_id))
+            ARM_SUBSCRIPTION_ID: ((.:creds.arm_subscription_id))
+            ARM_CLIENT_ID: ((.:creds.arm_client_id))
+            ARM_CLIENT_SECRET: ((.:creds.arm_client_secret))
+          run:
+            path: sh
+            args:
+            - -cx
+            - |
+              cd ./terraform-module-source
+              go mod tidy -e
+              go test -v ./terratest/default_test.go -timeout 60m
+
+  - name: publish-and-release
+    plan:
+      - get: terraform-module-source
+        trigger: true
+        passed: [test-infrastructure-code]
+      - task: version
+        config:
+          inputs:
+            - name: terraform-module-source
+          platform: linux
+          image_resource:
+            type: registry-image
+            source:
+              repository: registry.gitlab.com/juhani/go-semrel-gitlab
+              tag: v0.21.1
+          outputs:
+            - name: terraform-module-source
+          run:
+            path: sh
+            args:
+            - -cx
+            - |
+              cd ./terraform-module-source
+              release next-version --bump-patch > VERSION
+              release changelog
+      - task: archive
+        config:
+          inputs:
+            - name: terraform-module-source
+          outputs:
+            - name: artefacts
+          platform: linux
+          image_resource:
+            type: registry-image
+            source:
+              repository: node
+              tag: 18.16.1-bullseye
+          run:
+            path: sh
+            args:
+            - -cx
+            - |
+              export current=$(pwd) 
+              cd ./module
+              tar --warning=no-file-changed -zcvf $current/artefacts/terraform-module-source-$(date +%s).tgz .
+              cd $current
+      - put: maven-repository
+        params:
+          file: artefacts/terraform-module-source-*.tgz
+          version_file: terraform-module-source/VERSION
+      - put: terraform-module-release
+        params:
+          name: terraform-module-source/VERSION
+          tag: terraform-module-source/VERSION
+          commitish: terraform-module-source/.git/refs/heads/master
+          body: terraform-module-source/CHANGELOG.md
+          generate_release_notes: true

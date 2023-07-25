@@ -209,7 +209,7 @@ variable "function_app_websockets_enabled" {
 
 variable "function_app_cors_allowed_origins" {
   type        = list(string)
-  default     = []
+  default     = null
   description = ""
 }
 
